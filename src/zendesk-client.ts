@@ -1,8 +1,4 @@
-/**
- * Lightweight Zendesk API client. Uses native fetch. Accepts a Bearer token
- * per-request via AsyncLocalStorage so a single server process can serve
- * many users / subdomains concurrently.
- */
+/** Zendesk API client. Per-request credentials via AsyncLocalStorage. */
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { Buffer } from "node:buffer";
@@ -27,7 +23,7 @@ function getContext(): RequestContext {
   return ctx;
 }
 
-/** Default request timeout, 30s. Guards against the 'slow upstream blocks event loop' finding. */
+/** Default request timeout. */
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 export interface ZendeskRequestOptions {
@@ -93,25 +89,6 @@ export async function zendeskRequest<T = unknown>(opts: ZendeskRequestOptions): 
 }
 
 // ─── Attachment fetch ───────────────────────────────────────────────────────
-//
-// This is the SSRF-sensitive path (High finding in the original review).
-// Defenses layered in:
-//
-//   1. content_url must be https://<configured subdomain>.zendesk.com/...
-//      — prevents SSRF to arbitrary hosts and prevents Authorization leak.
-//   2. Redirects are followed manually. Zendesk's API redirects attachment
-//      requests to its CDN (zdusercontent.com). We validate the redirect host
-//      against an allowlist AND strip the Authorization header before the
-//      CDN hop (the CDN rejects auth'd requests with 403, and more importantly
-//      we must never send the bearer token to a non-Zendesk host).
-//   3. Redirect chain is capped (max 3 hops).
-//   4. MIME allowlist: image/jpeg, image/png, image/gif, image/webp. No SVG
-//      (active XML content), no arbitrary binary.
-//   5. Magic byte validation so a declared MIME can't spoof actual content.
-//   6. Size cap (10 MB) prevents image bombs and token budget blowout.
-//
-// Every layer is independently necessary — dropping any of them re-opens a
-// previously-identified vulnerability.
 
 const ALLOWED_IMAGE_TYPES = new Set([
   "image/jpeg",
@@ -132,7 +109,7 @@ const MAGIC_BYTES: Record<string, Uint8Array[]> = {
 
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 
-/** Hosts we trust for CDN redirects from the Zendesk attachment endpoint. */
+/** Trusted hosts for attachment CDN redirects. */
 function isZendeskAttachmentHost(hostname: string, subdomain: string): boolean {
   // Exact subdomain match for the Zendesk API host itself.
   if (hostname === `${subdomain}.zendesk.com`) return true;
@@ -156,7 +133,7 @@ export interface AttachmentResult {
 export async function fetchAttachment(contentUrl: string): Promise<AttachmentResult> {
   const ctx = getContext();
 
-  // Layer 1: validate the initial URL is on the configured Zendesk subdomain.
+  // Validate the URL is on the configured Zendesk subdomain.
   let parsed: URL;
   try {
     parsed = new URL(contentUrl);
@@ -173,8 +150,7 @@ export async function fetchAttachment(contentUrl: string): Promise<AttachmentRes
     );
   }
 
-  // Layer 2: follow redirects manually. Send auth only on the first hop
-  // (to Zendesk proper). Strip it for CDN hops.
+  // Follow redirects manually. Strip auth on cross-origin hops.
   let currentUrl = parsed.toString();
   let sendAuth = true;
   let finalResponse: Response | null = null;
@@ -224,7 +200,6 @@ export async function fetchAttachment(contentUrl: string): Promise<AttachmentRes
           "Zendesk attachments must redirect only to Zendesk or zdusercontent.com."
       );
     }
-    // Any cross-origin hop strips auth. Same-origin keeps it (unlikely here).
     if (next.hostname !== parsed.hostname) sendAuth = false;
     currentUrl = next.toString();
   }
@@ -236,7 +211,7 @@ export async function fetchAttachment(contentUrl: string): Promise<AttachmentRes
     throw new Error(`Attachment fetch failed: ${finalResponse.status} ${finalResponse.statusText}`);
   }
 
-  // Layer 4: MIME allowlist.
+  // MIME allowlist.
   const contentType = (finalResponse.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
   if (!ALLOWED_IMAGE_TYPES.has(contentType)) {
     throw new Error(
@@ -244,7 +219,7 @@ export async function fetchAttachment(contentUrl: string): Promise<AttachmentRes
     );
   }
 
-  // Layer 6: size-capped streaming read.
+  // Size-capped streaming read.
   const reader = finalResponse.body?.getReader();
   if (!reader) {
     throw new Error("Attachment response had no body");
@@ -271,7 +246,7 @@ export async function fetchAttachment(contentUrl: string): Promise<AttachmentRes
 
   const body = Buffer.concat(chunks);
 
-  // Layer 5: magic byte validation (catch MIME spoofing).
+  // Magic byte validation.
   const signatures = MAGIC_BYTES[contentType] ?? [];
   const bodyView = new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
   if (signatures.length && !signatures.some((sig) => startsWith(bodyView, sig))) {
@@ -358,8 +333,7 @@ export async function searchTickets(query: string, params?: { page?: number }): 
 
 // ─── Mutating operations (only registered in readwrite mode) ────────────────
 
-// Allowlisted fields for update_ticket. Explicit allowlist closes the
-// "update_ticket is an unrestricted field mutator" finding.
+// Allowlisted fields for update_ticket.
 const UPDATE_TICKET_FIELDS = [
   "subject",
   "status",
@@ -377,8 +351,6 @@ export async function updateTicket(
   ticketId: number,
   fields: Partial<Record<UpdateTicketField, unknown>>
 ): Promise<unknown> {
-  // Defense in depth: re-filter to the allowlist even though the zod schema
-  // upstream already enforces this. Two independent checks.
   const cleaned: Record<string, unknown> = {};
   for (const key of UPDATE_TICKET_FIELDS) {
     if (fields[key] !== undefined) cleaned[key] = fields[key];
