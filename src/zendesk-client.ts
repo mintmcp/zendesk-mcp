@@ -6,18 +6,18 @@ import { Buffer } from "node:buffer";
 /** Per-request context carrying the user's Zendesk credentials. */
 export interface RequestContext {
   accessToken: string;
-  subdomain: string;
+  zendeskDomain: string;
 }
 
 export const requestContext = new AsyncLocalStorage<RequestContext>();
 
 function getContext(): RequestContext {
   const ctx = requestContext.getStore();
-  if (!ctx?.accessToken || !ctx?.subdomain) {
+  if (!ctx?.accessToken || !ctx?.zendeskDomain) {
     throw new Error(
       "Missing Zendesk credentials. The OAuth access token must be forwarded as " +
-        "an Authorization: Bearer header, and SUBDOMAIN must be set as a container " +
-        "env var or forwarded via X-MintMCP-Env-SUBDOMAIN."
+        "an Authorization: Bearer header, and ZENDESK_DOMAIN must be set as a container " +
+        "env var or forwarded via X-MintMCP-Env-ZENDESK_DOMAIN."
     );
   }
   return ctx;
@@ -34,8 +34,8 @@ export interface ZendeskRequestOptions {
   timeoutMs?: number;
 }
 
-function buildUrl(subdomain: string, path: string, query?: ZendeskRequestOptions["query"]): URL {
-  const url = new URL(path, `https://${subdomain}.zendesk.com`);
+function buildUrl(zendeskDomain: string, path: string, query?: ZendeskRequestOptions["query"]): URL {
+  const url = new URL(path, `https://${zendeskDomain}`);
   if (query) {
     for (const [k, v] of Object.entries(query)) {
       if (v === undefined || v === "") continue;
@@ -47,7 +47,7 @@ function buildUrl(subdomain: string, path: string, query?: ZendeskRequestOptions
 
 export async function zendeskRequest<T = unknown>(opts: ZendeskRequestOptions): Promise<T> {
   const ctx = getContext();
-  const url = buildUrl(ctx.subdomain, opts.path, opts.query);
+  const url = buildUrl(ctx.zendeskDomain, opts.path, opts.query);
 
   const headers: Record<string, string> = {
     Authorization: `Bearer ${ctx.accessToken}`,
@@ -110,9 +110,9 @@ const MAGIC_BYTES: Record<string, Uint8Array[]> = {
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 
 /** Trusted hosts for attachment CDN redirects. */
-function isZendeskAttachmentHost(hostname: string, subdomain: string): boolean {
-  // Exact subdomain match for the Zendesk API host itself.
-  if (hostname === `${subdomain}.zendesk.com`) return true;
+function isZendeskAttachmentHost(hostname: string, zendeskDomain: string): boolean {
+  // Exact zendeskDomain match for the Zendesk API host itself.
+  if (hostname === zendeskDomain) return true;
   // Zendesk's CDN for attachment content.
   if (hostname === "zdusercontent.com") return true;
   if (hostname.endsWith(".zdusercontent.com")) return true;
@@ -133,7 +133,7 @@ export interface AttachmentResult {
 export async function fetchAttachment(contentUrl: string): Promise<AttachmentResult> {
   const ctx = getContext();
 
-  // Validate the URL is on the configured Zendesk subdomain.
+  // Validate the URL is on the configured Zendesk zendeskDomain.
   let parsed: URL;
   try {
     parsed = new URL(contentUrl);
@@ -143,10 +143,10 @@ export async function fetchAttachment(contentUrl: string): Promise<AttachmentRes
   if (parsed.protocol !== "https:") {
     throw new Error(`content_url must use https, got: ${parsed.protocol}`);
   }
-  if (parsed.hostname !== `${ctx.subdomain}.zendesk.com`) {
+  if (parsed.hostname !== ctx.zendeskDomain) {
     throw new Error(
-      `content_url host '${parsed.hostname}' does not match configured Zendesk subdomain ` +
-        `'${ctx.subdomain}.zendesk.com'. Use the content_url values returned by get_ticket_comments.`
+      `content_url host '${parsed.hostname}' does not match configured domain ` +
+        `'${ctx.zendeskDomain}'.`
     );
   }
 
@@ -194,7 +194,7 @@ export async function fetchAttachment(contentUrl: string): Promise<AttachmentRes
     if (next.protocol !== "https:") {
       throw new Error(`Refusing to follow non-https redirect to ${next.href}`);
     }
-    if (!isZendeskAttachmentHost(next.hostname, ctx.subdomain)) {
+    if (!isZendeskAttachmentHost(next.hostname, ctx.zendeskDomain)) {
       throw new Error(
         `Refusing to follow redirect to untrusted host '${next.hostname}'. ` +
           "Zendesk attachments must redirect only to Zendesk or zdusercontent.com."

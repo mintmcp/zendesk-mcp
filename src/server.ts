@@ -1,6 +1,6 @@
 /**
  * Zendesk MCP server — streamable HTTP, stateless.
- * OAuth token via Authorization header, subdomain via env var.
+ * OAuth token via Authorization header, domain via SUBDOMAIN env var.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -369,16 +369,16 @@ app.post("/mcp", async (req, res) => {
   const accessToken = typeof authHeader === "string" && authHeader.startsWith("Bearer ")
     ? authHeader.slice(7)
     : "";
-  const subdomainHeader = req.headers["x-mintmcp-env-subdomain"];
-  const subdomain = (typeof subdomainHeader === "string" ? subdomainHeader : "")
-    || process.env.SUBDOMAIN
+  const domainHeader = req.headers["x-mintmcp-env-zendesk_domain"];
+  const zendeskDomain = (typeof domainHeader === "string" ? domainHeader : "")
+    || process.env.ZENDESK_DOMAIN
     || "";
 
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
   });
 
-  requestContext.run({ accessToken, subdomain }, async () => {
+  requestContext.run({ accessToken, zendeskDomain }, async () => {
     try {
       res.on("close", () => transport.close());
       await server.connect(transport);

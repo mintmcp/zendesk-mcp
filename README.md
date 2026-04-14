@@ -7,7 +7,7 @@ Streamable HTTP MCP server for Zendesk. Stateless — OAuth access token arrives
 | Field | Source |
 |---|---|
 | Access token | `Authorization: Bearer <token>` header (MintMCP `headerMapping`) |
-| Subdomain | `SUBDOMAIN` env var or `X-MintMCP-Env-SUBDOMAIN` header |
+| Zendesk domain | `ZENDESK_DOMAIN` env var or `X-MintMCP-Env-ZENDESK_DOMAIN` header |
 
 ## Tools
 
