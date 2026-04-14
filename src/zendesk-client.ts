@@ -1,0 +1,439 @@
+/**
+ * Lightweight Zendesk API client. Uses native fetch. Accepts a Bearer token
+ * per-request via AsyncLocalStorage so a single server process can serve
+ * many users / subdomains concurrently.
+ */
+
+import { AsyncLocalStorage } from "node:async_hooks";
+import { Buffer } from "node:buffer";
+
+/** Per-request context carrying the user's Zendesk credentials. */
+export interface RequestContext {
+  accessToken: string;
+  subdomain: string;
+}
+
+export const requestContext = new AsyncLocalStorage<RequestContext>();
+
+function getContext(): RequestContext {
+  const ctx = requestContext.getStore();
+  if (!ctx?.accessToken || !ctx?.subdomain) {
+    throw new Error(
+      "Missing Zendesk credentials. The OAuth access token must be forwarded as " +
+        "an Authorization: Bearer header, and SUBDOMAIN must be set as a container " +
+        "env var or forwarded via X-MintMCP-Env-SUBDOMAIN."
+    );
+  }
+  return ctx;
+}
+
+/** Default request timeout, 30s. Guards against the 'slow upstream blocks event loop' finding. */
+const DEFAULT_TIMEOUT_MS = 30_000;
+
+export interface ZendeskRequestOptions {
+  method: "GET" | "POST" | "PUT" | "DELETE" | "PATCH";
+  path: string; // e.g. "/api/v2/tickets.json"
+  query?: Record<string, string | number | undefined>;
+  body?: unknown;
+  timeoutMs?: number;
+}
+
+function buildUrl(subdomain: string, path: string, query?: ZendeskRequestOptions["query"]): URL {
+  const url = new URL(path, `https://${subdomain}.zendesk.com`);
+  if (query) {
+    for (const [k, v] of Object.entries(query)) {
+      if (v === undefined || v === "") continue;
+      url.searchParams.set(k, String(v));
+    }
+  }
+  return url;
+}
+
+export async function zendeskRequest<T = unknown>(opts: ZendeskRequestOptions): Promise<T> {
+  const ctx = getContext();
+  const url = buildUrl(ctx.subdomain, opts.path, opts.query);
+
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${ctx.accessToken}`,
+    Accept: "application/json",
+  };
+  if (opts.body !== undefined) {
+    headers["Content-Type"] = "application/json";
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  );
+
+  let res: Response;
+  try {
+    res = await fetch(url.toString(), {
+      method: opts.method,
+      headers,
+      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    const truncated = text.length > 500 ? text.slice(0, 500) + "..." : text;
+    throw new Error(`Zendesk API ${res.status}: ${truncated || res.statusText}`);
+  }
+
+  const contentType = res.headers.get("content-type") || "";
+  if (contentType.includes("application/json")) {
+    return (await res.json()) as T;
+  }
+  return (await res.text()) as unknown as T;
+}
+
+// ─── Attachment fetch ───────────────────────────────────────────────────────
+//
+// This is the SSRF-sensitive path (High finding in the original review).
+// Defenses layered in:
+//
+//   1. content_url must be https://<configured subdomain>.zendesk.com/...
+//      — prevents SSRF to arbitrary hosts and prevents Authorization leak.
+//   2. Redirects are followed manually. Zendesk's API redirects attachment
+//      requests to its CDN (zdusercontent.com). We validate the redirect host
+//      against an allowlist AND strip the Authorization header before the
+//      CDN hop (the CDN rejects auth'd requests with 403, and more importantly
+//      we must never send the bearer token to a non-Zendesk host).
+//   3. Redirect chain is capped (max 3 hops).
+//   4. MIME allowlist: image/jpeg, image/png, image/gif, image/webp. No SVG
+//      (active XML content), no arbitrary binary.
+//   5. Magic byte validation so a declared MIME can't spoof actual content.
+//   6. Size cap (10 MB) prevents image bombs and token budget blowout.
+//
+// Every layer is independently necessary — dropping any of them re-opens a
+// previously-identified vulnerability.
+
+const ALLOWED_IMAGE_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+]);
+
+const MAGIC_BYTES: Record<string, Uint8Array[]> = {
+  "image/jpeg": [new Uint8Array([0xff, 0xd8, 0xff])],
+  "image/png": [new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])],
+  "image/gif": [
+    new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x37, 0x61]), // GIF87a
+    new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61]), // GIF89a
+  ],
+  "image/webp": [new Uint8Array([0x52, 0x49, 0x46, 0x46])], // RIFF (+ WEBP at byte 8)
+};
+
+const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+
+/** Hosts we trust for CDN redirects from the Zendesk attachment endpoint. */
+function isZendeskAttachmentHost(hostname: string, subdomain: string): boolean {
+  // Exact subdomain match for the Zendesk API host itself.
+  if (hostname === `${subdomain}.zendesk.com`) return true;
+  // Zendesk's CDN for attachment content.
+  if (hostname === "zdusercontent.com") return true;
+  if (hostname.endsWith(".zdusercontent.com")) return true;
+  return false;
+}
+
+function startsWith(buf: Uint8Array, sig: Uint8Array): boolean {
+  if (buf.length < sig.length) return false;
+  for (let i = 0; i < sig.length; i++) if (buf[i] !== sig[i]) return false;
+  return true;
+}
+
+export interface AttachmentResult {
+  contentType: string;
+  dataBase64: string;
+}
+
+export async function fetchAttachment(contentUrl: string): Promise<AttachmentResult> {
+  const ctx = getContext();
+
+  // Layer 1: validate the initial URL is on the configured Zendesk subdomain.
+  let parsed: URL;
+  try {
+    parsed = new URL(contentUrl);
+  } catch {
+    throw new Error(`Invalid content_url: ${contentUrl}`);
+  }
+  if (parsed.protocol !== "https:") {
+    throw new Error(`content_url must use https, got: ${parsed.protocol}`);
+  }
+  if (parsed.hostname !== `${ctx.subdomain}.zendesk.com`) {
+    throw new Error(
+      `content_url host '${parsed.hostname}' does not match configured Zendesk subdomain ` +
+        `'${ctx.subdomain}.zendesk.com'. Use the content_url values returned by get_ticket_comments.`
+    );
+  }
+
+  // Layer 2: follow redirects manually. Send auth only on the first hop
+  // (to Zendesk proper). Strip it for CDN hops.
+  let currentUrl = parsed.toString();
+  let sendAuth = true;
+  let finalResponse: Response | null = null;
+  const MAX_REDIRECTS = 3;
+
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    const headers: Record<string, string> = {};
+    if (sendAuth) headers["Authorization"] = `Bearer ${ctx.accessToken}`;
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+    let res: Response;
+    try {
+      res = await fetch(currentUrl, {
+        method: "GET",
+        headers,
+        redirect: "manual",
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    // Not a redirect — this is our final response.
+    if (res.status < 300 || res.status >= 400) {
+      finalResponse = res;
+      break;
+    }
+
+    // Redirect: validate the next host before following.
+    const location = res.headers.get("location");
+    if (!location) {
+      throw new Error(`Redirect ${res.status} with no Location header`);
+    }
+    let next: URL;
+    try {
+      next = new URL(location, currentUrl);
+    } catch {
+      throw new Error(`Invalid redirect Location: ${location}`);
+    }
+    if (next.protocol !== "https:") {
+      throw new Error(`Refusing to follow non-https redirect to ${next.href}`);
+    }
+    if (!isZendeskAttachmentHost(next.hostname, ctx.subdomain)) {
+      throw new Error(
+        `Refusing to follow redirect to untrusted host '${next.hostname}'. ` +
+          "Zendesk attachments must redirect only to Zendesk or zdusercontent.com."
+      );
+    }
+    // Any cross-origin hop strips auth. Same-origin keeps it (unlikely here).
+    if (next.hostname !== parsed.hostname) sendAuth = false;
+    currentUrl = next.toString();
+  }
+
+  if (!finalResponse) {
+    throw new Error(`Too many redirects (> ${MAX_REDIRECTS}) fetching attachment`);
+  }
+  if (!finalResponse.ok) {
+    throw new Error(`Attachment fetch failed: ${finalResponse.status} ${finalResponse.statusText}`);
+  }
+
+  // Layer 4: MIME allowlist.
+  const contentType = (finalResponse.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+  if (!ALLOWED_IMAGE_TYPES.has(contentType)) {
+    throw new Error(
+      `Attachment type '${contentType}' is not allowed. Supported: ${[...ALLOWED_IMAGE_TYPES].join(", ")}`
+    );
+  }
+
+  // Layer 6: size-capped streaming read.
+  const reader = finalResponse.body?.getReader();
+  if (!reader) {
+    throw new Error("Attachment response had no body");
+  }
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > MAX_ATTACHMENT_BYTES) {
+      try {
+        await reader.cancel();
+      } catch {
+        /* ignore */
+      }
+      throw new Error(
+        `Attachment exceeds ${MAX_ATTACHMENT_BYTES / (1024 * 1024)} MB size limit`
+      );
+    }
+    chunks.push(value);
+  }
+
+  const body = Buffer.concat(chunks);
+
+  // Layer 5: magic byte validation (catch MIME spoofing).
+  const signatures = MAGIC_BYTES[contentType] ?? [];
+  const bodyView = new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+  if (signatures.length && !signatures.some((sig) => startsWith(bodyView, sig))) {
+    throw new Error(
+      `File header does not match declared content type '${contentType}'. Attachment may be spoofed.`
+    );
+  }
+  // Extra check for WebP: bytes 8-11 must be 'WEBP'.
+  if (contentType === "image/webp") {
+    const webpMarker = body.subarray(8, 12).toString("ascii");
+    if (webpMarker !== "WEBP") {
+      throw new Error("File header does not match declared content type 'image/webp'.");
+    }
+  }
+
+  return {
+    contentType,
+    dataBase64: body.toString("base64"),
+  };
+}
+
+// ─── Convenience helpers over zendeskRequest ────────────────────────────────
+
+export async function getAttachment(id: number): Promise<unknown> {
+  const res = await zendeskRequest<{ attachment: unknown }>({
+    method: "GET",
+    path: `/api/v2/attachments/${id}.json`,
+  });
+  return res.attachment;
+}
+
+export async function getTicket(id: number): Promise<unknown> {
+  const res = await zendeskRequest<{ ticket: unknown }>({
+    method: "GET",
+    path: `/api/v2/tickets/${id}.json`,
+  });
+  return res.ticket;
+}
+
+export async function listTickets(params: {
+  page?: number;
+  sort_by?: string;
+  sort_order?: "asc" | "desc";
+}): Promise<unknown> {
+  const perPage = 20;
+  return zendeskRequest({
+    method: "GET",
+    path: "/api/v2/tickets.json",
+    query: {
+      page: params.page ?? 1,
+      per_page: perPage,
+      sort_by: params.sort_by ?? "created_at",
+      sort_order: params.sort_order ?? "desc",
+    },
+  });
+}
+
+export async function getTicketComments(
+  ticketId: number,
+  params?: { page?: number }
+): Promise<unknown> {
+  const perPage = 5;
+  return zendeskRequest({
+    method: "GET",
+    path: `/api/v2/tickets/${ticketId}/comments.json`,
+    query: {
+      page: params?.page ?? 1,
+      per_page: perPage,
+    },
+  });
+}
+
+export async function searchTickets(query: string, params?: { page?: number }): Promise<unknown> {
+  return zendeskRequest({
+    method: "GET",
+    path: "/api/v2/search.json",
+    query: {
+      query: `type:ticket ${query}`,
+      page: params?.page ?? 1,
+      per_page: 20,
+    },
+  });
+}
+
+// ─── Mutating operations (only registered in readwrite mode) ────────────────
+
+// Allowlisted fields for update_ticket. Explicit allowlist closes the
+// "update_ticket is an unrestricted field mutator" finding.
+const UPDATE_TICKET_FIELDS = [
+  "subject",
+  "status",
+  "priority",
+  "type",
+  "assignee_id",
+  "requester_id",
+  "tags",
+  "custom_fields",
+  "due_at",
+] as const;
+export type UpdateTicketField = (typeof UPDATE_TICKET_FIELDS)[number];
+
+export async function updateTicket(
+  ticketId: number,
+  fields: Partial<Record<UpdateTicketField, unknown>>
+): Promise<unknown> {
+  // Defense in depth: re-filter to the allowlist even though the zod schema
+  // upstream already enforces this. Two independent checks.
+  const cleaned: Record<string, unknown> = {};
+  for (const key of UPDATE_TICKET_FIELDS) {
+    if (fields[key] !== undefined) cleaned[key] = fields[key];
+  }
+  const res = await zendeskRequest<{ ticket: unknown }>({
+    method: "PUT",
+    path: `/api/v2/tickets/${ticketId}.json`,
+    body: { ticket: cleaned },
+  });
+  return res.ticket;
+}
+
+const CREATE_TICKET_FIELDS = [
+  "subject",
+  "description",
+  "requester_id",
+  "assignee_id",
+  "priority",
+  "type",
+  "tags",
+  "custom_fields",
+] as const;
+export type CreateTicketField = (typeof CREATE_TICKET_FIELDS)[number];
+
+export async function createTicket(
+  fields: Partial<Record<CreateTicketField, unknown>> & { subject: string; description: string }
+): Promise<unknown> {
+  const cleaned: Record<string, unknown> = {};
+  for (const key of CREATE_TICKET_FIELDS) {
+    if (fields[key] !== undefined) cleaned[key] = fields[key];
+  }
+  // Zendesk requires a "comment" with body for ticket creation.
+  const ticket = { ...cleaned, comment: { body: fields.description } };
+  const res = await zendeskRequest<{ ticket: unknown }>({
+    method: "POST",
+    path: "/api/v2/tickets.json",
+    body: { ticket },
+  });
+  return res.ticket;
+}
+
+export async function createTicketComment(
+  ticketId: number,
+  comment: string,
+  isPublic: boolean
+): Promise<unknown> {
+  const res = await zendeskRequest<{ ticket: unknown }>({
+    method: "PUT",
+    path: `/api/v2/tickets/${ticketId}.json`,
+    body: {
+      ticket: {
+        comment: { body: comment, public: isPublic },
+      },
+    },
+  });
+  return res.ticket;
+}
+
