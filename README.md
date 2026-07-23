@@ -18,7 +18,8 @@ Streamable HTTP MCP server for Zendesk. Stateless — OAuth access token arrives
 - `get_ticket_attachment` — fetch image by attachment ID (jpeg/png/gif/webp, ≤10MB)
 - `create_ticket` — create a ticket (strict schema)
 - `update_ticket` — update ticket fields (strict schema)
-- `create_ticket_comment` — add public comment or internal note
+- `create_ticket_comment_public` — add a public comment, visible to the requester
+- `create_ticket_comment_internal` — add an internal note, not visible to the requester
 
 All tools return structured content via `outputSchema` + `structuredContent`. Page sizes are fixed server-side.
 
@@ -35,6 +36,6 @@ npm run dev          # tsx watch mode
 ```bash
 docker build -t zendesk-mcp .
 docker run --rm -p 8000:8000 \
-  -e SUBDOMAIN=your_subdomain \
+  -e ZENDESK_DOMAIN=your_subdomain.zendesk.com \
   zendesk-mcp
 ```

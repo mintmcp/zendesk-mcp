@@ -1,6 +1,6 @@
 /**
  * Zendesk MCP server — streamable HTTP, stateless.
- * OAuth token via Authorization header, domain via SUBDOMAIN env var.
+ * OAuth token via Authorization header, domain via ZENDESK_DOMAIN env var.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -334,22 +334,40 @@ server.registerTool(
   }
 );
 
+const CreateTicketCommentInputSchema = {
+  ticket_id: z.number().int().positive(),
+  comment: z.string().min(1).describe("Comment body (HTML or plain text)"),
+};
+
+const CreateTicketCommentOutputSchema = { message: z.string(), ticket_id: z.number() };
+
 server.registerTool(
-  "create_ticket_comment",
+  "create_ticket_comment_public",
   {
     description:
-      "Add a comment to an existing ticket. Set public=false for an internal note." + MUTATION_WARNING,
-    inputSchema: {
-      ticket_id: z.number().int().positive(),
-      comment: z.string().min(1).describe("Comment body (HTML or plain text)"),
-      public: z.boolean().default(true).describe("Whether the comment is visible to the requester"),
-    },
-    outputSchema: { message: z.string(), ticket_id: z.number() },
+      "Add a public comment to an existing ticket, visible to the requester." + MUTATION_WARNING,
+    inputSchema: CreateTicketCommentInputSchema,
+    outputSchema: CreateTicketCommentOutputSchema,
     annotations: { destructiveHint: false, openWorldHint: true },
   },
-  async ({ ticket_id, comment, public: isPublic }) => {
-    await createTicketComment(ticket_id, comment, isPublic);
-    return structured({ message: `Comment created on ticket ${ticket_id}`, ticket_id });
+  async ({ ticket_id, comment }) => {
+    await createTicketComment(ticket_id, comment, true);
+    return structured({ message: `Public comment created on ticket ${ticket_id}`, ticket_id });
+  }
+);
+
+server.registerTool(
+  "create_ticket_comment_internal",
+  {
+    description:
+      "Add an internal note to an existing ticket, not visible to the requester." + MUTATION_WARNING,
+    inputSchema: CreateTicketCommentInputSchema,
+    outputSchema: CreateTicketCommentOutputSchema,
+    annotations: { destructiveHint: false, openWorldHint: true },
+  },
+  async ({ ticket_id, comment }) => {
+    await createTicketComment(ticket_id, comment, false);
+    return structured({ message: `Internal note created on ticket ${ticket_id}`, ticket_id });
   }
 );
 
@@ -364,7 +382,7 @@ app.get("/healthz", (_req, res) => {
 
 app.post("/mcp", async (req, res) => {
   // Access token: MintMCP forwards the OAuth token as `Authorization: Bearer <token>`.
-  // Subdomain: global env var set on the container, or per-request via X-MintMCP-Env-SUBDOMAIN.
+  // Domain: global env var set on the container, or per-request via X-MintMCP-Env-ZENDESK_DOMAIN.
   const authHeader = req.headers["authorization"] ?? "";
   const accessToken = typeof authHeader === "string" && authHeader.startsWith("Bearer ")
     ? authHeader.slice(7)
