@@ -290,7 +290,7 @@ server.registerTool(
     description: "Create a new Zendesk ticket." + MUTATION_WARNING,
     inputSchema: CreateTicketSchema,
     outputSchema: { message: z.string(), ticket: z.object(TicketDetailShape) },
-    annotations: { openWorldHint: true },
+    annotations: { destructiveHint: false, openWorldHint: true },
   },
   async (args: z.infer<typeof CreateTicketSchema>) => {
     const ticket = await createTicket(args);
