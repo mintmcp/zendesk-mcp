@@ -1,6 +1,6 @@
 {
   "name": "zendesk-mcp",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Zendesk MCP server (streamable HTTP, OAuth pass-through via headers)",
   "type": "module",
   "main": "dist/server.js",
