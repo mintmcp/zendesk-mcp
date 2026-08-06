@@ -542,6 +542,12 @@ function createServer(): McpServer {
 
 // ─── HTTP transport ─────────────────────────────────────────────────────────
 
+// Zendesk accounts are always <subdomain>.zendesk.com, so that is the whole
+// allowlist. Do NOT add a `u` flag: it would make [a-z] match unicode look-alikes.
+function isZendeskHost(host: string): boolean {
+  return /^[a-z0-9][a-z0-9-]*\.zendesk\.com$/i.test(host);
+}
+
 const app = express();
 app.use(express.json({ limit: "4mb" }));
 
@@ -557,9 +563,19 @@ app.post("/mcp", async (req, res) => {
     ? authHeader.slice(7)
     : "";
   const domainHeader = req.headers["x-mintmcp-env-zendesk_domain"];
-  const zendeskDomain = (typeof domainHeader === "string" ? domainHeader : "")
-    || process.env.ZENDESK_DOMAIN
-    || "";
+  const normalizeDomain = (value: unknown) =>
+    (typeof value === "string" ? value : "").trim().toLowerCase();
+  // Trim each candidate before falling through, so a whitespace-only header
+  // does not win over the container default and then collapse to empty.
+  const requestedDomain =
+    normalizeDomain(domainHeader) || normalizeDomain(process.env.ZENDESK_DOMAIN);
+  // The domain arrives on the request and is the host the bearer token is sent
+  // to, so an unvalidated value turns this endpoint into a token exfiltration
+  // primitive if the container is ever reachable outside the gateway.
+  const zendeskDomain = isZendeskHost(requestedDomain) ? requestedDomain : "";
+  if (requestedDomain && !zendeskDomain) {
+    console.error(`Rejected non-Zendesk domain: ${requestedDomain}`);
+  }
 
   // A fresh server + transport per request: the SDK binds one transport per
   // server instance, so reusing a shared server across concurrent requests
@@ -570,12 +586,15 @@ app.post("/mcp", async (req, res) => {
   });
 
   requestContext.run({ accessToken, zendeskDomain }, async () => {
+    let connected = false;
     try {
       res.on("close", () => {
-        transport.close();
-        server.close();
+        // server.close() closes its transport, so closing both would double-close.
+        if (connected) server.close().catch((err) => console.error("MCP cleanup error:", err));
+        else transport.close().catch((err) => console.error("MCP cleanup error:", err));
       });
       await server.connect(transport);
+      connected = true;
       await transport.handleRequest(req, res, req.body);
     } catch (err) {
       console.error("MCP request error:", err);
@@ -585,6 +604,8 @@ app.post("/mcp", async (req, res) => {
           error: { code: -32603, message: "Internal server error" },
           id: null,
         });
+      } else {
+        res.end();
       }
     }
   });
