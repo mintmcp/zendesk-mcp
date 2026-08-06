@@ -13,6 +13,7 @@ import {
   listTickets,
   getTicketComments,
   searchTickets,
+  listTicketForms,
   getAttachment,
   fetchAttachment,
   updateTicket,
@@ -56,6 +57,20 @@ function shapeTicketDetail(t: any) {
     custom_fields: (t.custom_fields ?? []).filter((f: any) => f.value != null),
     collaborator_ids: t.collaborator_ids ?? [],
     brand_id: t.brand_id ?? null,
+    ticket_form_id: t.ticket_form_id ?? null,
+  };
+}
+
+function shapeTicketForm(f: any) {
+  return {
+    id: f.id,
+    name: f.name,
+    display_name: f.display_name ?? null,
+    active: f.active ?? false,
+    default: f.default ?? false,
+    end_user_visible: f.end_user_visible ?? false,
+    position: f.position ?? null,
+    ticket_field_ids: f.ticket_field_ids ?? [],
   };
 }
 
@@ -114,6 +129,18 @@ const TicketDetailShape = {
   custom_fields: z.array(CustomFieldSchema),
   collaborator_ids: z.array(z.number()),
   brand_id: z.number().nullable(),
+  ticket_form_id: z.number().nullable(),
+};
+
+const TicketFormShape = {
+  id: z.number(),
+  name: z.string(),
+  display_name: z.string().nullable(),
+  active: z.boolean(),
+  default: z.boolean(),
+  end_user_visible: z.boolean(),
+  position: z.number().nullable(),
+  ticket_field_ids: z.array(z.number()),
 };
 
 const AttachmentSchema = z.object({
@@ -131,6 +158,15 @@ const CommentShape = {
   created_at: z.string(),
   attachments: z.array(AttachmentSchema),
 };
+
+const TicketFormIdInput = z
+  .number()
+  .int()
+  .positive()
+  .optional()
+  .describe(
+    "ID of the ticket form to render for this ticket, from get_ticket_forms. Zendesk Enterprise only: on lower plans this field is ignored. Changing the form on an existing ticket hides custom fields the new form does not include. Previously saved values remain available via the API and business rules, but hidden fields no longer appear in the agent UI, and unsaved edits to fields hidden before submit are not retained."
+  );
 
 const PaginationShape = {
   count: z.number(),
@@ -153,6 +189,7 @@ const CreateTicketSchema = z
     custom_fields: z
       .array(z.object({ id: z.number().int().positive(), value: z.unknown() }).strict())
       .optional(),
+    ticket_form_id: TicketFormIdInput,
   })
   .strict();
 
@@ -170,6 +207,7 @@ const UpdateTicketSchema = z
       .array(z.object({ id: z.number().int().positive(), value: z.unknown() }).strict())
       .optional(),
     due_at: z.string().optional().describe("ISO-8601 datetime"),
+    ticket_form_id: TicketFormIdInput,
   })
   .strict();
 
@@ -285,6 +323,35 @@ function createServer(): McpServer {
       const data = {
         comments: (raw.comments ?? []).map(shapeComment),
         count: raw.count ?? 0,
+        next_page: raw.next_page ?? null,
+        previous_page: raw.previous_page ?? null,
+      };
+      return structured(data);
+    }
+  );
+
+  server.registerTool(
+    "get_ticket_forms",
+    {
+      description:
+        "List the ticket forms configured on this Zendesk account. Use this to discover the ticket_form_id to pass to create_ticket, instead of hardcoding form IDs. Each form determines which custom fields agents see on the ticket.",
+      inputSchema: {
+        page: z.number().int().positive().optional().describe("Page number (1-based)"),
+      },
+      outputSchema: {
+        ticket_forms: z.array(z.object(TicketFormShape)),
+        ...PaginationShape,
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ page }) => {
+      const raw = (await listTicketForms({ page })) as any;
+      const ticket_forms = (raw.ticket_forms ?? []).map(shapeTicketForm);
+      // The ticket_forms envelope often omits count, and a hardcoded 0 alongside a
+      // populated list reads as "no forms configured".
+      const data = {
+        ticket_forms,
+        count: raw.count ?? ticket_forms.length,
         next_page: raw.next_page ?? null,
         previous_page: raw.previous_page ?? null,
       };

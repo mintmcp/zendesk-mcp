@@ -319,6 +319,17 @@ export async function getTicketComments(
   });
 }
 
+export async function listTicketForms(params?: { page?: number }): Promise<unknown> {
+  return zendeskRequest({
+    method: "GET",
+    path: "/api/v2/ticket_forms.json",
+    query: {
+      page: params?.page ?? 1,
+      per_page: 20,
+    },
+  });
+}
+
 export async function searchTickets(query: string, params?: { page?: number }): Promise<unknown> {
   return zendeskRequest({
     method: "GET",
@@ -344,6 +355,7 @@ const UPDATE_TICKET_FIELDS = [
   "tags",
   "custom_fields",
   "due_at",
+  "ticket_form_id",
 ] as const;
 export type UpdateTicketField = (typeof UPDATE_TICKET_FIELDS)[number];
 
@@ -372,6 +384,7 @@ const CREATE_TICKET_FIELDS = [
   "type",
   "tags",
   "custom_fields",
+  "ticket_form_id",
 ] as const;
 export type CreateTicketField = (typeof CREATE_TICKET_FIELDS)[number];
 
