@@ -13,6 +13,9 @@ import {
   listTickets,
   getTicketComments,
   searchTickets,
+  searchUsers,
+  MAX_USER_SEARCH_QUERY_LENGTH,
+  MAX_USER_SEARCH_PAGE,
   listTicketForms,
   getAttachment,
   fetchAttachment,
@@ -90,6 +93,23 @@ function shapeComment(c: any) {
   };
 }
 
+function shapeUser(u: any) {
+  return {
+    id: u.id,
+    name: u.name ?? null,
+    email: u.email ?? null,
+    role: u.role ?? null,
+    // Null rather than false: tombstones omit these, and suspended:false would assert
+    // the unsafe direction for an unknown value
+    active: u.active ?? null,
+    suspended: u.suspended ?? null,
+    verified: u.verified ?? null,
+    organization_id: u.organization_id ?? null,
+    created_at: u.created_at ?? null,
+    updated_at: u.updated_at ?? null,
+  };
+}
+
 function structured(data: Record<string, unknown>) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(data) }],
@@ -157,6 +177,19 @@ const CommentShape = {
   public: z.boolean(),
   created_at: z.string(),
   attachments: z.array(AttachmentSchema),
+};
+
+const UserSummaryShape = {
+  id: z.number(),
+  name: z.string().nullable(),
+  email: z.string().nullable(),
+  role: z.string().nullable(),
+  active: z.boolean().nullable(),
+  suspended: z.boolean().nullable(),
+  verified: z.boolean().nullable(),
+  organization_id: z.number().nullable(),
+  created_at: z.string().nullable(),
+  updated_at: z.string().nullable(),
 };
 
 const TicketFormIdInput = z
@@ -297,6 +330,65 @@ function createServer(): McpServer {
         results: (raw.results ?? []).map(shapeTicketSummary),
         count: raw.count ?? 0,
         next_page: raw.next_page ?? null,
+        previous_page: raw.previous_page ?? null,
+      };
+      return structured(data);
+    }
+  );
+
+  server.registerTool(
+    "search_users",
+    {
+      description:
+        'Look up specific Zendesk users with Zendesk search syntax (type:user is added ' +
+        'automatically), typically to resolve an email to a requester_id for create_ticket. ' +
+        'Zendesk does NOT do exact email matching: email:"a@b.com" also matches users whose ' +
+        'address merely starts with that value, and quoting does not change this. Always compare ' +
+        'the returned email field yourself, character for character, and check ' +
+        'active/suspended/verified (one address can belong to several accounts) before using an id ' +
+        'as requester_id; ask the user rather than guessing between near-matches. ' +
+        'Search lags the index by about a minute, so a just-created user may not be found yet.',
+      inputSchema: {
+        query: z
+          .string()
+          .min(1)
+          .max(MAX_USER_SEARCH_QUERY_LENGTH, `Query must be ${MAX_USER_SEARCH_QUERY_LENGTH} characters or fewer.`)
+          .describe("Zendesk user search query, non-blank and without a type: term"),
+        page: z
+          .number()
+          .int()
+          .positive()
+          .max(MAX_USER_SEARCH_PAGE)
+          .optional()
+          .describe(`Page number (1-based, max ${MAX_USER_SEARCH_PAGE})`),
+      },
+      outputSchema: {
+        results: z.array(z.object(UserSummaryShape)),
+        ...PaginationShape,
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ query, page }) => {
+      const raw = (await searchUsers(query, { page })) as any;
+      if (typeof raw !== "object" || raw === null || !Array.isArray(raw.results)) {
+        throw new Error(
+          "Unexpected response from Zendesk search: expected a results array. The request may " +
+            "have been intercepted by a proxy or the domain may be misconfigured."
+        );
+      }
+      const users = raw.results.filter((r: any) => (r?.result_type ?? "user") === "user");
+      if (raw.results.length > 0 && users.length === 0) {
+        const seen = [...new Set(raw.results.map((r: any) => String(r?.result_type)))].join(", ");
+        throw new Error(
+          `Zendesk search returned no user records (result_type: ${seen}). Refusing to report ` +
+            "this as 'user not found'."
+        );
+      }
+      const servedLastPage = (page ?? 1) >= MAX_USER_SEARCH_PAGE;
+      const data = {
+        results: users.map(shapeUser),
+        count: raw.count ?? 0,
+        next_page: servedLastPage ? null : raw.next_page ?? null,
         previous_page: raw.previous_page ?? null,
       };
       return structured(data);

@@ -45,6 +45,24 @@ function buildUrl(zendeskDomain: string, path: string, query?: ZendeskRequestOpt
   return url;
 }
 
+/**
+ * Retry-After is legally delta-seconds or an HTTP-date. Returns null when the value is
+ * unusable, including an elapsed date; 0 is a legal wait, so callers must test for null
+ * rather than falsiness. The letter gate keeps Date.parse from reading numeric junk like
+ * "-5" as a year, and RFC 9110 wants the zoneless asctime form read as UTC
+ */
+function parseRetryAfterSeconds(header: string | null): number | null {
+  const value = header?.trim();
+  if (!value) return null;
+  if (/^\d+$/.test(value)) return parseInt(value, 10);
+  if (!/[a-z]/i.test(value)) return null;
+  const zoned = /\b(gmt|utc|[+-]\d{4})\b/i.test(value) ? value : `${value} GMT`;
+  const asDate = Date.parse(zoned);
+  if (Number.isNaN(asDate)) return null;
+  const seconds = Math.ceil((asDate - Date.now()) / 1000);
+  return seconds > 0 ? seconds : null;
+}
+
 export async function zendeskRequest<T = unknown>(opts: ZendeskRequestOptions): Promise<T> {
   const ctx = getContext();
   const url = buildUrl(ctx.zendeskDomain, opts.path, opts.query);
@@ -78,6 +96,19 @@ export async function zendeskRequest<T = unknown>(opts: ZendeskRequestOptions): 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     const truncated = text.length > 500 ? text.slice(0, 500) + "..." : text;
+    // The Search API limit is far tighter than the plain REST endpoints, so a 429
+    // must read as "wait" rather than as a generic retryable failure
+    if (res.status === 429) {
+      const wait = parseRetryAfterSeconds(res.headers.get("retry-after"));
+      const guidance =
+        wait !== null
+          ? `retry after ${wait} seconds`
+          : "no usable Retry-After was supplied, so wait at least 60 seconds";
+      throw new Error(
+        `Zendesk API 429: rate limited, ${guidance}. Do not retry sooner.` +
+          (truncated ? ` Upstream: ${truncated}` : "")
+      );
+    }
     throw new Error(`Zendesk API ${res.status}: ${truncated || res.statusText}`);
   }
 
@@ -337,6 +368,53 @@ export async function searchTickets(query: string, params?: { page?: number }): 
     query: {
       query: `type:ticket ${query}`,
       page: params?.page ?? 1,
+      per_page: 20,
+    },
+  });
+}
+
+export const MAX_USER_SEARCH_QUERY_LENGTH = 512;
+
+/** Deep paging is the mechanism for exporting a user directory, so it is capped */
+export const MAX_USER_SEARCH_PAGE = 2;
+
+function buildUserSearchQuery(query: string): string {
+  const trimmed = query.trim();
+  if (!trimmed) {
+    throw new Error(
+      "search_users requires a non-empty query. Provide a search term such as " +
+        'email:"a@b.com", a name, or role:end-user.'
+    );
+  }
+  if (trimmed.length > MAX_USER_SEARCH_QUERY_LENGTH) {
+    throw new Error(
+      `search_users query must be ${MAX_USER_SEARCH_QUERY_LENGTH} characters or fewer ` +
+        `(got ${trimmed.length}).`
+    );
+  }
+  // Word-anchored so a legitimate name search like "prototype:" still passes
+  if (/\btype\s*:/i.test(trimmed)) {
+    throw new Error(
+      "search_users query must not contain a 'type:' term. This tool always searches " +
+        "type:user; use search_tickets for tickets."
+    );
+  }
+  return `type:user ${trimmed}`;
+}
+
+export async function searchUsers(query: string, params?: { page?: number }): Promise<unknown> {
+  const page = params?.page ?? 1;
+  if (page > MAX_USER_SEARCH_PAGE) {
+    throw new Error(
+      `search_users serves at most ${MAX_USER_SEARCH_PAGE} pages. Narrow the query instead of paging.`
+    );
+  }
+  return zendeskRequest({
+    method: "GET",
+    path: "/api/v2/search.json",
+    query: {
+      query: buildUserSearchQuery(query),
+      page,
       per_page: 20,
     },
   });
