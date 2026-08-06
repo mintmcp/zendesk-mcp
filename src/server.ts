@@ -20,8 +20,6 @@ import {
   createTicketComment,
 } from "./zendesk-client.js";
 
-const server = new McpServer({ name: "zendesk", version: "1.0.0" });
-
 // ─── Output shaping ──────────────────────────────────────────────────────────
 //
 // Shape raw Zendesk API responses into clean, consistent objects that match
@@ -140,132 +138,6 @@ const PaginationShape = {
   previous_page: z.string().nullable(),
 };
 
-// ─── Read-only tools ────────────────────────────────────────────────────────
-
-server.registerTool(
-  "get_ticket",
-  {
-    description:
-      "Retrieve a Zendesk ticket by its ID. Returns full detail including description and custom fields.",
-    inputSchema: {
-      ticket_id: z.number().int().positive().describe("The ID of the ticket to retrieve"),
-    },
-    outputSchema: TicketDetailShape,
-    annotations: { readOnlyHint: true, openWorldHint: true },
-  },
-  async ({ ticket_id }) => {
-    const ticket = await getTicket(ticket_id);
-    return structured(shapeTicketDetail(ticket));
-  }
-);
-
-server.registerTool(
-  "get_tickets",
-  {
-    description: "List tickets with pagination.",
-    inputSchema: {
-      page: z.number().int().positive().optional().describe("Page number (1-based)"),
-      sort_by: z
-        .enum(["created_at", "updated_at", "priority", "status"])
-        .optional()
-        .describe("Field to sort by"),
-      sort_order: z.enum(["asc", "desc"]).optional().describe("Sort order"),
-    },
-    outputSchema: {
-      tickets: z.array(z.object(TicketSummaryShape)),
-      ...PaginationShape,
-    },
-    annotations: { readOnlyHint: true, openWorldHint: true },
-  },
-  async (args) => {
-    const raw = (await listTickets(args)) as any;
-    const data = {
-      tickets: (raw.tickets ?? []).map(shapeTicketSummary),
-      count: raw.count ?? 0,
-      next_page: raw.next_page ?? null,
-      previous_page: raw.previous_page ?? null,
-    };
-    return structured(data);
-  }
-);
-
-server.registerTool(
-  "search_tickets",
-  {
-    description:
-      "Search tickets using Zendesk search syntax (e.g. 'status:open priority:high'). See Zendesk search reference for operators.",
-    inputSchema: {
-      query: z.string().min(1).describe("Zendesk search query (type:ticket is added automatically)"),
-      page: z.number().int().positive().optional().describe("Page number (1-based)"),
-    },
-    outputSchema: {
-      results: z.array(z.object(TicketSummaryShape)),
-      ...PaginationShape,
-    },
-    annotations: { readOnlyHint: true, openWorldHint: true },
-  },
-  async ({ query, page }) => {
-    const raw = (await searchTickets(query, { page })) as any;
-    const data = {
-      results: (raw.results ?? []).map(shapeTicketSummary),
-      count: raw.count ?? 0,
-      next_page: raw.next_page ?? null,
-      previous_page: raw.previous_page ?? null,
-    };
-    return structured(data);
-  }
-);
-
-server.registerTool(
-  "get_ticket_comments",
-  {
-    description:
-      "Retrieve comments for a ticket with pagination. Includes attachment metadata (use attachment id with get_ticket_attachment).",
-    inputSchema: {
-      ticket_id: z.number().int().positive().describe("The ID of the ticket"),
-      page: z.number().int().positive().optional().describe("Page number (1-based)"),
-    },
-    outputSchema: {
-      comments: z.array(z.object(CommentShape)),
-      ...PaginationShape,
-    },
-    annotations: { readOnlyHint: true, openWorldHint: true },
-  },
-  async ({ ticket_id, page }) => {
-    const raw = (await getTicketComments(ticket_id, { page })) as any;
-    const data = {
-      comments: (raw.comments ?? []).map(shapeComment),
-      count: raw.count ?? 0,
-      next_page: raw.next_page ?? null,
-      previous_page: raw.previous_page ?? null,
-    };
-    return structured(data);
-  }
-);
-
-server.registerTool(
-  "get_ticket_attachment",
-  {
-    description:
-      "Fetch an image attachment (jpeg/png/gif/webp, ≤10MB) by its attachment ID from get_ticket_comments.",
-    inputSchema: {
-      attachment_id: z.number().int().positive().describe("The attachment id from get_ticket_comments"),
-    },
-    annotations: { readOnlyHint: true, openWorldHint: true },
-  },
-  async ({ attachment_id }) => {
-    const meta = await getAttachment(attachment_id);
-    const { contentType, dataBase64 } = await fetchAttachment((meta as any).content_url);
-    return {
-      content: [
-        { type: "image" as const, data: dataBase64, mimeType: contentType },
-      ],
-    };
-  }
-);
-
-// ─── Mutating tools ───────────────────────────────────────────────────────
-
 const MUTATION_WARNING =
   " IMPORTANT: This is a mutating action. Confirm with the user BEFORE calling this tool — show them the exact content/fields you plan to send and wait for explicit approval.";
 
@@ -284,21 +156,6 @@ const CreateTicketSchema = z
   })
   .strict();
 
-server.registerTool(
-  "create_ticket",
-  {
-    description: "Create a new Zendesk ticket." + MUTATION_WARNING,
-    inputSchema: CreateTicketSchema,
-    outputSchema: { message: z.string(), ticket: z.object(TicketDetailShape) },
-    annotations: { destructiveHint: false, openWorldHint: true },
-  },
-  async (args: z.infer<typeof CreateTicketSchema>) => {
-    const ticket = await createTicket(args);
-    const data = { message: "Ticket created", ticket: shapeTicketDetail(ticket) };
-    return structured(data);
-  }
-);
-
 const UpdateTicketSchema = z
   .object({
     ticket_id: z.number().int().positive().describe("The ID of the ticket to update"),
@@ -316,24 +173,6 @@ const UpdateTicketSchema = z
   })
   .strict();
 
-server.registerTool(
-  "update_ticket",
-  {
-    description:
-      "Update fields on an existing Zendesk ticket (status, priority, assignee, etc.). Only the fields in this schema may be updated." +
-      MUTATION_WARNING,
-    inputSchema: UpdateTicketSchema,
-    outputSchema: { message: z.string(), ticket: z.object(TicketDetailShape) },
-    annotations: { openWorldHint: true },
-  },
-  async (args: z.infer<typeof UpdateTicketSchema>) => {
-    const { ticket_id, ...fields } = args;
-    const ticket = await updateTicket(ticket_id, fields);
-    const data = { message: "Ticket updated", ticket: shapeTicketDetail(ticket) };
-    return structured(data);
-  }
-);
-
 const CreateTicketCommentInputSchema = {
   ticket_id: z.number().int().positive(),
   comment: z.string().min(1).describe("Comment body (HTML or plain text)"),
@@ -341,35 +180,206 @@ const CreateTicketCommentInputSchema = {
 
 const CreateTicketCommentOutputSchema = { message: z.string(), ticket_id: z.number() };
 
-server.registerTool(
-  "create_ticket_comment_public",
-  {
-    description:
-      "Add a public comment to an existing ticket, visible to the requester." + MUTATION_WARNING,
-    inputSchema: CreateTicketCommentInputSchema,
-    outputSchema: CreateTicketCommentOutputSchema,
-    annotations: { destructiveHint: false, openWorldHint: true },
-  },
-  async ({ ticket_id, comment }) => {
-    await createTicketComment(ticket_id, comment, true);
-    return structured({ message: `Public comment created on ticket ${ticket_id}`, ticket_id });
-  }
-);
+// ─── Server factory ───────────────────────────────────────────────────────────
+//
+// A fresh McpServer is built per connection. The MCP SDK's Protocol assumes one
+// transport per instance, so sharing a single server across concurrent requests
+// throws "Already connected to a transport" on the second connect().
 
-server.registerTool(
-  "create_ticket_comment_internal",
-  {
-    description:
-      "Add an internal note to an existing ticket, not visible to the requester." + MUTATION_WARNING,
-    inputSchema: CreateTicketCommentInputSchema,
-    outputSchema: CreateTicketCommentOutputSchema,
-    annotations: { destructiveHint: false, openWorldHint: true },
-  },
-  async ({ ticket_id, comment }) => {
-    await createTicketComment(ticket_id, comment, false);
-    return structured({ message: `Internal note created on ticket ${ticket_id}`, ticket_id });
-  }
-);
+function createServer(): McpServer {
+  const server = new McpServer({ name: "zendesk", version: "1.0.0" });
+
+  // ─── Read-only tools ────────────────────────────────────────────────────────
+
+  server.registerTool(
+    "get_ticket",
+    {
+      description:
+        "Retrieve a Zendesk ticket by its ID. Returns full detail including description and custom fields.",
+      inputSchema: {
+        ticket_id: z.number().int().positive().describe("The ID of the ticket to retrieve"),
+      },
+      outputSchema: TicketDetailShape,
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ ticket_id }) => {
+      const ticket = await getTicket(ticket_id);
+      return structured(shapeTicketDetail(ticket));
+    }
+  );
+
+  server.registerTool(
+    "get_tickets",
+    {
+      description: "List tickets with pagination.",
+      inputSchema: {
+        page: z.number().int().positive().optional().describe("Page number (1-based)"),
+        sort_by: z
+          .enum(["created_at", "updated_at", "priority", "status"])
+          .optional()
+          .describe("Field to sort by"),
+        sort_order: z.enum(["asc", "desc"]).optional().describe("Sort order"),
+      },
+      outputSchema: {
+        tickets: z.array(z.object(TicketSummaryShape)),
+        ...PaginationShape,
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async (args) => {
+      const raw = (await listTickets(args)) as any;
+      const data = {
+        tickets: (raw.tickets ?? []).map(shapeTicketSummary),
+        count: raw.count ?? 0,
+        next_page: raw.next_page ?? null,
+        previous_page: raw.previous_page ?? null,
+      };
+      return structured(data);
+    }
+  );
+
+  server.registerTool(
+    "search_tickets",
+    {
+      description:
+        "Search tickets using Zendesk search syntax (e.g. 'status:open priority:high'). See Zendesk search reference for operators.",
+      inputSchema: {
+        query: z.string().min(1).describe("Zendesk search query (type:ticket is added automatically)"),
+        page: z.number().int().positive().optional().describe("Page number (1-based)"),
+      },
+      outputSchema: {
+        results: z.array(z.object(TicketSummaryShape)),
+        ...PaginationShape,
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ query, page }) => {
+      const raw = (await searchTickets(query, { page })) as any;
+      const data = {
+        results: (raw.results ?? []).map(shapeTicketSummary),
+        count: raw.count ?? 0,
+        next_page: raw.next_page ?? null,
+        previous_page: raw.previous_page ?? null,
+      };
+      return structured(data);
+    }
+  );
+
+  server.registerTool(
+    "get_ticket_comments",
+    {
+      description:
+        "Retrieve comments for a ticket with pagination. Includes attachment metadata (use attachment id with get_ticket_attachment).",
+      inputSchema: {
+        ticket_id: z.number().int().positive().describe("The ID of the ticket"),
+        page: z.number().int().positive().optional().describe("Page number (1-based)"),
+      },
+      outputSchema: {
+        comments: z.array(z.object(CommentShape)),
+        ...PaginationShape,
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ ticket_id, page }) => {
+      const raw = (await getTicketComments(ticket_id, { page })) as any;
+      const data = {
+        comments: (raw.comments ?? []).map(shapeComment),
+        count: raw.count ?? 0,
+        next_page: raw.next_page ?? null,
+        previous_page: raw.previous_page ?? null,
+      };
+      return structured(data);
+    }
+  );
+
+  server.registerTool(
+    "get_ticket_attachment",
+    {
+      description:
+        "Fetch an image attachment (jpeg/png/gif/webp, ≤10MB) by its attachment ID from get_ticket_comments.",
+      inputSchema: {
+        attachment_id: z.number().int().positive().describe("The attachment id from get_ticket_comments"),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ attachment_id }) => {
+      const meta = await getAttachment(attachment_id);
+      const { contentType, dataBase64 } = await fetchAttachment((meta as any).content_url);
+      return {
+        content: [
+          { type: "image" as const, data: dataBase64, mimeType: contentType },
+        ],
+      };
+    }
+  );
+
+  // ─── Mutating tools ───────────────────────────────────────────────────────
+
+  server.registerTool(
+    "create_ticket",
+    {
+      description: "Create a new Zendesk ticket." + MUTATION_WARNING,
+      inputSchema: CreateTicketSchema,
+      outputSchema: { message: z.string(), ticket: z.object(TicketDetailShape) },
+      annotations: { destructiveHint: false, openWorldHint: true },
+    },
+    async (args: z.infer<typeof CreateTicketSchema>) => {
+      const ticket = await createTicket(args);
+      const data = { message: "Ticket created", ticket: shapeTicketDetail(ticket) };
+      return structured(data);
+    }
+  );
+
+  server.registerTool(
+    "update_ticket",
+    {
+      description:
+        "Update fields on an existing Zendesk ticket (status, priority, assignee, etc.). Only the fields in this schema may be updated." +
+        MUTATION_WARNING,
+      inputSchema: UpdateTicketSchema,
+      outputSchema: { message: z.string(), ticket: z.object(TicketDetailShape) },
+      annotations: { openWorldHint: true },
+    },
+    async (args: z.infer<typeof UpdateTicketSchema>) => {
+      const { ticket_id, ...fields } = args;
+      const ticket = await updateTicket(ticket_id, fields);
+      const data = { message: "Ticket updated", ticket: shapeTicketDetail(ticket) };
+      return structured(data);
+    }
+  );
+
+  server.registerTool(
+    "create_ticket_comment_public",
+    {
+      description:
+        "Add a public comment to an existing ticket, visible to the requester." + MUTATION_WARNING,
+      inputSchema: CreateTicketCommentInputSchema,
+      outputSchema: CreateTicketCommentOutputSchema,
+      annotations: { destructiveHint: false, openWorldHint: true },
+    },
+    async ({ ticket_id, comment }) => {
+      await createTicketComment(ticket_id, comment, true);
+      return structured({ message: `Public comment created on ticket ${ticket_id}`, ticket_id });
+    }
+  );
+
+  server.registerTool(
+    "create_ticket_comment_internal",
+    {
+      description:
+        "Add an internal note to an existing ticket, not visible to the requester." + MUTATION_WARNING,
+      inputSchema: CreateTicketCommentInputSchema,
+      outputSchema: CreateTicketCommentOutputSchema,
+      annotations: { destructiveHint: false, openWorldHint: true },
+    },
+    async ({ ticket_id, comment }) => {
+      await createTicketComment(ticket_id, comment, false);
+      return structured({ message: `Internal note created on ticket ${ticket_id}`, ticket_id });
+    }
+  );
+
+  return server;
+}
 
 // ─── HTTP transport ─────────────────────────────────────────────────────────
 
@@ -392,13 +402,20 @@ app.post("/mcp", async (req, res) => {
     || process.env.ZENDESK_DOMAIN
     || "";
 
+  // A fresh server + transport per request: the SDK binds one transport per
+  // server instance, so reusing a shared server across concurrent requests
+  // throws "Already connected to a transport".
+  const server = createServer();
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
   });
 
   requestContext.run({ accessToken, zendeskDomain }, async () => {
     try {
-      res.on("close", () => transport.close());
+      res.on("close", () => {
+        transport.close();
+        server.close();
+      });
       await server.connect(transport);
       await transport.handleRequest(req, res, req.body);
     } catch (err) {
