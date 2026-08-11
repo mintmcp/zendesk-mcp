@@ -64,7 +64,7 @@ export const MacroApplyShape = {
   ticket_id: z.number(),
   macro_id: z.number(),
   comment_body: z.string().nullable(),
-  comment_is_html: z.boolean(),
+  send_as_html: z.boolean(),
 };
 
 // ─── Shaping ────────────────────────────────────────────────────────────────
@@ -86,8 +86,12 @@ function normalizeActions(raw: unknown): MacroAction[] {
     .map((a: any) => ({ field: a.field as string, value: a.value }));
 }
 
-function requireObject(value: unknown, label: string): any {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function requireObject(value: unknown, label: string): Record<string, unknown> {
+  if (!isRecord(value)) {
     throw new Error(`Zendesk returned an unexpected ${label} payload (expected an object).`);
   }
   return value;
@@ -99,6 +103,15 @@ function isOversized(text: string | null): boolean {
 
 function containsPlaceholders(body: string | null): boolean {
   return body !== null && PLACEHOLDER_PATTERN.test(body);
+}
+
+function describeCommentBody(body: string | null) {
+  const withheld = isOversized(body);
+  return {
+    body: withheld ? null : body,
+    comment_withheld: withheld,
+    contains_placeholders: containsPlaceholders(body),
+  };
 }
 
 function hasOversizedBody(actions: MacroAction[]): boolean {
@@ -153,22 +166,20 @@ function extractComment(actions: MacroAction[]) {
   const mode = actions.find((a) => a.field === "comment_mode_is_public");
 
   const source = readText(html?.value) !== null ? html : plain;
-  const body = readText(source?.value);
-  const withheld = isOversized(body);
+  const { body, ...bodyFields } = describeCommentBody(readText(source?.value));
 
   return {
-    comment_template: withheld ? null : body,
-    comment_withheld: withheld,
+    comment_template: body,
+    ...bodyFields,
     comment_is_html: source === html && html !== undefined,
     // Channel scoping is stored on comment_value, so it survives preferring the HTML body.
     comment_channel: readChannel(source?.value) ?? readChannel(plain?.value),
     // Zendesk stringifies booleans in macro actions.
     comment_public: mode ? mode.value === true || mode.value === "true" : null,
-    contains_placeholders: containsPlaceholders(body),
   };
 }
 
-export function shapeMacroSummary(raw: any) {
+export function shapeMacroSummary(raw: unknown) {
   const m = requireObject(raw, "macro");
   if (typeof m.id !== "number" || typeof m.title !== "string") {
     throw new Error("Zendesk returned a macro without a numeric id and string title.");
@@ -183,7 +194,7 @@ export function shapeMacroSummary(raw: any) {
   };
 }
 
-export function shapeMacroDetail(raw: any) {
+export function shapeMacroDetail(raw: unknown) {
   const m = requireObject(raw, "macro");
   const allActions = normalizeActions(m.actions);
   const { actions, truncated } = shapeActions(allActions, hasOversizedBody(allActions));
@@ -200,20 +211,23 @@ export function shapeMacroDetail(raw: any) {
 
 // Show Ticket After Changes returns the WHOLE ticket, not a change list, so its
 // non-comment keys are the ticket itself and are not the macro's field changes.
-export function shapeMacroApply(ticketId: number, macroId: number, raw: any) {
+export function shapeMacroApply(ticketId: number, macroId: number, raw: unknown) {
   const ticket = requireObject(raw, "macro apply result");
-  const comment = ticket.comment ?? {};
-  const body = typeof comment.body === "string" ? comment.body : null;
-  const withheld = isOversized(body);
+  const comment = isRecord(ticket.comment) ? ticket.comment : {};
+  const rendered = typeof comment.body === "string" ? comment.body : null;
+  const { body, ...bodyFields } = describeCommentBody(rendered);
+  const scoped = Array.isArray(comment.scoped_body) ? comment.scoped_body[0] : null;
 
   return {
     ticket_id: ticketId,
     macro_id: macroId,
-    comment_body: withheld ? null : body,
-    comment_withheld: withheld,
+    comment_body: body,
+    ...bodyFields,
     comment_public: typeof comment.public === "boolean" ? comment.public : null,
-    comment_channel: readChannel(comment.scoped_body?.[0]),
-    contains_placeholders: containsPlaceholders(body),
-    comment_is_html: body !== null && HTML_TAG_PATTERN.test(body),
+    comment_channel: readChannel(scoped),
+    // Named for where it goes: this is the value to pass as the comment tools'
+    // is_html. Unlike get_macro's comment_is_html it is inferred from the text,
+    // because the apply endpoint never states which form it returned.
+    send_as_html: rendered !== null && HTML_TAG_PATTERN.test(rendered),
   };
 }
