@@ -533,16 +533,18 @@ export async function createTicket(
 export async function createTicketComment(
   ticketId: number,
   comment: string,
-  isPublic: boolean
+  isPublic: boolean,
+  isHtml = false
 ): Promise<unknown> {
+  // Zendesk renders html_body as rich text; body is delivered as plain text, so
+  // markup sent through it reaches the customer as visible tags.
+  const payload = isHtml
+    ? { html_body: comment, public: isPublic }
+    : { body: comment, public: isPublic };
   const res = await zendeskRequest<{ ticket: unknown }>({
     method: "PUT",
     path: `/api/v2/tickets/${ticketId}.json`,
-    body: {
-      ticket: {
-        comment: { body: comment, public: isPublic },
-      },
-    },
+    body: { ticket: { comment: payload } },
   });
   return res.ticket;
 }

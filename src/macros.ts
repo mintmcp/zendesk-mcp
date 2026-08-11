@@ -22,6 +22,10 @@ const CAPPED_SUFFIX = "...[capped]";
 // and either one left unrendered would reach the customer verbatim.
 const PLACEHOLDER_PATTERN = /\{\{|\{%/;
 
+// The apply endpoint returns rich text only when the macro has no plain-text
+// fallback, and never says which it sent, so the body itself is the only signal.
+const HTML_TAG_PATTERN = /<\/?[a-z][a-z0-9]*(\s[^>]*)?>/i;
+
 // ─── Output contract ────────────────────────────────────────────────────────
 
 const MacroActionSchema = z.object({ field: z.string(), value: z.unknown() });
@@ -60,6 +64,7 @@ export const MacroApplyShape = {
   ticket_id: z.number(),
   macro_id: z.number(),
   comment_body: z.string().nullable(),
+  comment_is_html: z.boolean(),
 };
 
 // ─── Shaping ────────────────────────────────────────────────────────────────
@@ -209,5 +214,6 @@ export function shapeMacroApply(ticketId: number, macroId: number, raw: any) {
     comment_public: typeof comment.public === "boolean" ? comment.public : null,
     comment_channel: readChannel(comment.scoped_body?.[0]),
     contains_placeholders: containsPlaceholders(body),
+    comment_is_html: body !== null && HTML_TAG_PATTERN.test(body),
   };
 }

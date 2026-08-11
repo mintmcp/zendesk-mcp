@@ -261,7 +261,13 @@ const UpdateTicketSchema = z
 
 const CreateTicketCommentInputSchema = {
   ticket_id: z.number().int().positive(),
-  comment: z.string().min(1).describe("Comment body. Submitted as plain text; HTML markup is not rendered."),
+  comment: z.string().min(1).describe("Comment body"),
+  is_html: z
+    .boolean()
+    .optional()
+    .describe(
+      "Set true when comment contains HTML, so Zendesk renders it as rich text. Pass apply_macro_to_ticket's comment_is_html straight through. When false or omitted the comment is sent as plain text and any markup shows as visible tags."
+    ),
 };
 
 const CreateTicketCommentOutputSchema = { message: z.string(), ticket_id: z.number() };
@@ -556,7 +562,7 @@ function createServer(): McpServer {
     "apply_macro_to_ticket",
     {
       description:
-        "Preview the comment a macro would add to a ticket, with placeholders resolved against that ticket. Read-only. For the macro's field changes and comment visibility use get_macro; this endpoint reports neither. Post comment_body via create_ticket_comment_public or create_ticket_comment_internal, honoring get_macro's comment_public when it is true or false. Do NOT post, ask the user, if comment_body contains HTML markup (these tools send plain text, so tags would show), contains_placeholders is true, or comment_withheld is true." +
+        "Preview the comment a macro would add to a ticket, with placeholders resolved against that ticket. Read-only. For the macro's field changes and comment visibility use get_macro; this endpoint reports neither. Post comment_body via create_ticket_comment_public or create_ticket_comment_internal, honoring get_macro's comment_public when it is true or false and passing comment_is_html straight through as that tool's is_html. Do NOT post, ask the user, if contains_placeholders is true or comment_withheld is true." +
         UNTRUSTED_CONTENT_NOTE,
       inputSchema: {
         ticket_id: z
@@ -619,8 +625,8 @@ function createServer(): McpServer {
       outputSchema: CreateTicketCommentOutputSchema,
       annotations: { destructiveHint: false, openWorldHint: true },
     },
-    async ({ ticket_id, comment }) => {
-      await createTicketComment(ticket_id, comment, true);
+    async ({ ticket_id, comment, is_html }) => {
+      await createTicketComment(ticket_id, comment, true, is_html ?? false);
       return structured({ message: `Public comment created on ticket ${ticket_id}`, ticket_id });
     }
   );
@@ -634,8 +640,8 @@ function createServer(): McpServer {
       outputSchema: CreateTicketCommentOutputSchema,
       annotations: { destructiveHint: false, openWorldHint: true },
     },
-    async ({ ticket_id, comment }) => {
-      await createTicketComment(ticket_id, comment, false);
+    async ({ ticket_id, comment, is_html }) => {
+      await createTicketComment(ticket_id, comment, false, is_html ?? false);
       return structured({ message: `Internal note created on ticket ${ticket_id}`, ticket_id });
     }
   );
