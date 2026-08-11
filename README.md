@@ -14,6 +14,7 @@ Streamable HTTP MCP server for Zendesk. Stateless — OAuth access token arrives
 - `get_ticket` — fetch a ticket by ID
 - `get_tickets` — paginated ticket list with sort (20/page)
 - `search_tickets` — Zendesk search syntax (20/page)
+- `get_ticket_forms` — list configured ticket forms to discover `ticket_form_id` (20/page)
 - `get_ticket_comments` — comment thread with attachment metadata (5/page)
 - `get_ticket_attachment` — fetch image by attachment ID (jpeg/png/gif/webp, ≤10MB)
 - `create_ticket` — create a ticket (strict schema)
