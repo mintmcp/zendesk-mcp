@@ -20,6 +20,9 @@ Streamable HTTP MCP server for Zendesk. Stateless — OAuth access token arrives
 - `get_ticket_forms` — list configured ticket forms to discover `ticket_form_id` (20/page)
 - `get_ticket_comments` — comment thread with attachment metadata (5/page)
 - `get_ticket_attachment` — fetch image by attachment ID (jpeg/png/gif/webp, ≤10MB)
+- `list_macros` — paginated macro list, titles and IDs only (20/page)
+- `get_macro` — a macro's stored content; the comment is a template and may hold unresolved `{{placeholders}}`
+- `apply_macro_to_ticket` — preview a macro against a ticket with placeholders resolved; does not modify the ticket
 - `create_ticket` — create a ticket (strict schema)
 - `update_ticket` — update ticket fields (strict schema)
 - `create_ticket_comment_public` — add a public comment, visible to the requester

@@ -140,6 +140,12 @@ const MAGIC_BYTES: Record<string, Uint8Array[]> = {
 
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 
+// Zendesk accounts are always <subdomain>.zendesk.com, so that is the whole
+// allowlist. Do NOT add a `u` flag: it would make [a-z] match unicode look-alikes.
+export function isZendeskHost(host: string): boolean {
+  return /^[a-z0-9][a-z0-9-]*\.zendesk\.com$/i.test(host);
+}
+
 /** Trusted hosts for attachment CDN redirects. */
 function isZendeskAttachmentHost(hostname: string, zendeskDomain: string): boolean {
   // Exact zendeskDomain match for the Zendesk API host itself.
@@ -420,7 +426,48 @@ export async function searchUsers(query: string, params?: { page?: number }): Pr
   });
 }
 
-// ─── Mutating operations (only registered in readwrite mode) ────────────────
+export async function listMacros(params?: {
+  page?: number;
+  active?: boolean;
+}): Promise<unknown> {
+  const perPage = 20;
+  return zendeskRequest({
+    method: "GET",
+    path: "/api/v2/macros.json",
+    query: {
+      page: params?.page ?? 1,
+      per_page: perPage,
+      active: params?.active === undefined ? undefined : String(params.active),
+      // Zendesk defaults this to false, which for an admin token lists the
+      // personal macros of every other agent.
+      only_viewable: params?.active === false ? undefined : "true",
+    },
+  });
+}
+
+export async function getMacro(id: number): Promise<unknown> {
+  const res = await zendeskRequest<{ macro: unknown }>({
+    method: "GET",
+    path: `/api/v2/macros/${id}.json`,
+  });
+  return res.macro;
+}
+
+export async function applyMacroToTicket(
+  ticketId: number,
+  macroId: number
+): Promise<unknown> {
+  // normalize_comment makes newlines match what the ticket comment editor
+  // produces, which is where this body is headed.
+  const res = await zendeskRequest<{ result?: { ticket?: unknown } }>({
+    method: "GET",
+    path: `/api/v2/tickets/${ticketId}/macros/${macroId}/apply.json`,
+    query: { normalize_comment: "true" },
+  });
+  return res.result?.ticket;
+}
+
+// ─── Mutating operations ────────────────────────────────────────────────────
 
 // Allowlisted fields for update_ticket.
 const UPDATE_TICKET_FIELDS = [
