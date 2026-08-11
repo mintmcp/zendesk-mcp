@@ -225,9 +225,6 @@ export function shapeMacroApply(ticketId: number, macroId: number, raw: unknown)
     ...bodyFields,
     comment_public: typeof comment.public === "boolean" ? comment.public : null,
     comment_channel: readChannel(scoped),
-    // Named for where it goes: this is the value to pass as the comment tools'
-    // is_html. Unlike get_macro's comment_is_html it is inferred from the text,
-    // because the apply endpoint never states which form it returned.
     send_as_html: rendered !== null && HTML_TAG_PATTERN.test(rendered),
   };
 }
