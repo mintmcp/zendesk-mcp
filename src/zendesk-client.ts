@@ -514,14 +514,35 @@ const CREATE_TICKET_FIELDS = [
 export type CreateTicketField = (typeof CREATE_TICKET_FIELDS)[number];
 
 export async function createTicket(
-  fields: Partial<Record<CreateTicketField, unknown>> & { subject: string; description: string }
+  fields: Partial<Record<CreateTicketField, unknown>> & {
+    subject: string;
+    description: string;
+    first_comment_visibility?: "public" | "internal";
+  }
 ): Promise<unknown> {
   const cleaned: Record<string, unknown> = {};
   for (const key of CREATE_TICKET_FIELDS) {
     if (fields[key] !== undefined) cleaned[key] = fields[key];
   }
-  // Zendesk requires a "comment" with body for ticket creation.
-  const ticket = { ...cleaned, comment: { body: fields.description } };
+  // Refuse anything unrecognised rather than guessing: this helper is exported, so a
+  // caller outside the Zod-validated path could otherwise email the customer an
+  // unapproved draft. Omission stays public to preserve the original behaviour
+  const requested: unknown =
+    fields.first_comment_visibility === undefined ? "public" : fields.first_comment_visibility;
+  if (requested !== "public" && requested !== "internal") {
+    throw new Error(
+      `Unsupported first_comment_visibility ${JSON.stringify(requested)}. Expected "public" or "internal".`
+    );
+  }
+  // Zendesk requires a "comment" with body for ticket creation. public:false files it
+  // as an internal note, which is what suppresses the default requester notification
+  const ticket = {
+    ...cleaned,
+    comment: {
+      body: fields.description,
+      public: requested === "public",
+    },
+  };
   const res = await zendeskRequest<{ ticket: unknown }>({
     method: "POST",
     path: "/api/v2/tickets.json",
