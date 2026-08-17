@@ -246,6 +246,12 @@ const CreateTicketSchema = z
       .array(z.object({ id: z.number().int().positive(), value: z.unknown() }).strict())
       .optional(),
     ticket_form_id: TicketFormIdInput,
+    first_comment_visibility: z
+      .enum(["public", "internal"])
+      .default("public")
+      .describe(
+        "Visibility of the description, which becomes the ticket's first comment. Defaults to public, which emails the requester as soon as the ticket is created. Use internal to file the description as an agent-only note instead, so Zendesk's default requester-notification trigger does not fire and a human can review the draft first; accounts with customised creation triggers may still email the requester, and agent-side triggers such as assignee notifications still fire either way. Prefer internal whenever the description is an unreviewed draft, or came from a macro whose comment_public is false. The choice is permanent: Zendesk can make a comment private but never public, so the reviewed reply has to be sent as a NEW public comment via create_ticket_comment_public, and this description stays the internal draft. The description is sent as plain text, so pass HTML bodies through create_ticket_comment_public instead of writing them here."
+      ),
   })
   .strict();
 
@@ -620,14 +626,24 @@ function createServer(): McpServer {
   server.registerTool(
     "create_ticket",
     {
-      description: "Create a new Zendesk ticket." + MUTATION_WARNING,
+      description:
+        "Create a new Zendesk ticket. By default the description becomes a public first comment, which emails the requester immediately and cannot be recalled; pass first_comment_visibility to control that." +
+        MUTATION_WARNING,
       inputSchema: CreateTicketSchema,
       outputSchema: TicketMutationOutput,
       annotations: { destructiveHint: false, openWorldHint: true },
     },
     async (args: z.infer<typeof CreateTicketSchema>) => {
       const ticket = await createTicket(args);
-      const data = { message: "Ticket created", ticket: shapeTicketDetail(ticket) };
+      const detail = shapeTicketDetail(ticket);
+      const wantedInternal = args.first_comment_visibility === "internal";
+      // Zendesk cannot un-send a public first comment, so a requested-internal ticket
+      // that comes back public has to be reported loudly, not as a bare success
+      const message =
+        wantedInternal && detail.is_public !== false
+          ? `Ticket created, but Zendesk reports is_public ${detail.is_public}, so the first comment may have reached the requester and cannot be recalled. Verify the ticket before continuing.`
+          : `Ticket created (first comment recorded as ${wantedInternal ? "internal" : "public"}; whether the requester is emailed depends on the account's triggers)`;
+      const data = { message, ticket: detail };
       return structured(data);
     }
   );
