@@ -8,24 +8,27 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import express from "express";
 import { z } from "zod";
 import {
-  requestContext,
-  getTicket,
-  listTickets,
-  getTicketComments,
-  searchTickets,
-  searchUsers,
-  MAX_USER_SEARCH_QUERY_LENGTH,
   MAX_USER_SEARCH_PAGE,
-  listTicketForms,
-  getAttachment,
-  fetchAttachment,
-  updateTicket,
+  MAX_USER_SEARCH_QUERY_LENGTH,
+  NOT_CONNECTED_MESSAGE,
+  WWW_AUTHENTICATE,
+  applyMacroToTicket,
   createTicket,
   createTicketComment,
-  listMacros,
+  fetchAttachment,
+  getAttachment,
   getMacro,
-  applyMacroToTicket,
+  getTicket,
+  getTicketComments,
   isZendeskHost,
+  listMacros,
+  listTicketForms,
+  listTickets,
+  requestContext,
+  requiresAccessToken,
+  searchTickets,
+  searchUsers,
+  updateTicket,
 } from "./zendesk-client.js";
 import {
   shapeMacroSummary,
@@ -712,9 +715,24 @@ app.post("/mcp", async (req, res) => {
   // Access token: MintMCP forwards the OAuth token as `Authorization: Bearer <token>`.
   // Domain: global env var set on the container, or per-request via X-MintMCP-Env-ZENDESK_DOMAIN.
   const authHeader = req.headers["authorization"] ?? "";
-  const accessToken = typeof authHeader === "string" && authHeader.startsWith("Bearer ")
-    ? authHeader.slice(7)
-    : "";
+  // RFC 6750: the "Bearer" scheme name is case-insensitive
+  const accessToken =
+    (typeof authHeader === "string" ? authHeader.match(/^bearer\s+(.*)$/i)?.[1].trim() : "") ?? "";
+
+  // Answer an unauthenticated tool call at the transport layer: a tool-level
+  // error gives the client nothing to trigger a re-auth from. Only the token is
+  // gated here; a missing ZENDESK_DOMAIN is a config error, not an auth one.
+  if (!accessToken && requiresAccessToken(req.body)) {
+    res
+      .status(401)
+      .set("WWW-Authenticate", WWW_AUTHENTICATE)
+      .json({
+        jsonrpc: "2.0",
+        error: { code: -32001, message: NOT_CONNECTED_MESSAGE },
+        id: null,
+      });
+    return;
+  }
   const domainHeader = req.headers["x-mintmcp-env-zendesk_domain"];
   const normalizeDomain = (value: unknown) =>
     (typeof value === "string" ? value : "").trim().toLowerCase();
