@@ -141,8 +141,6 @@ function structured(data: Record<string, unknown>) {
 
 const TicketSummaryShape = {
   id: z.number(),
-  // Agent Workspace requires a subject, but tickets created via the API or email can omit
-  // it, and Zendesk returns null for those.
   subject: z.string().nullable(),
   status: z.string(),
   priority: z.string().nullable(),
