@@ -26,6 +26,7 @@ import {
   listTickets,
   requestContext,
   requiresAccessToken,
+  responseIdFor,
   searchTickets,
   searchUsers,
   updateTicket,
@@ -729,7 +730,7 @@ app.post("/mcp", async (req, res) => {
       .json({
         jsonrpc: "2.0",
         error: { code: -32001, message: NOT_CONNECTED_MESSAGE },
-        id: null,
+        id: responseIdFor(req.body),
       });
     return;
   }
