@@ -44,7 +44,7 @@ import {
 function shapeTicketSummary(t: any) {
   return {
     id: t.id,
-    subject: t.subject,
+    subject: t.subject ?? null,
     status: t.status,
     priority: t.priority ?? null,
     type: t.type ?? null,
@@ -141,7 +141,7 @@ function structured(data: Record<string, unknown>) {
 
 const TicketSummaryShape = {
   id: z.number(),
-  subject: z.string(),
+  subject: z.string().nullable(),
   status: z.string(),
   priority: z.string().nullable(),
   type: z.string().nullable(),
