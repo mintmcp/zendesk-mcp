@@ -4,6 +4,38 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { Buffer } from "node:buffer";
 
 /** Per-request context carrying the user's Zendesk credentials. */
+export const NOT_CONNECTED_MESSAGE =
+  "Zendesk is not connected. Authorize the Zendesk connector for this user and confirm the " +
+  "ZENDESK_DOMAIN setting, then retry. (The OAuth access token is forwarded as an " +
+  "Authorization: Bearer header and the domain as X-MintMCP-Env-ZENDESK_DOMAIN.)";
+
+export const WWW_AUTHENTICATE =
+  'Bearer realm="zendesk-mcp", error="invalid_token", error_description="Missing Zendesk access token"';
+
+interface JsonRpcMessage {
+  method?: string;
+  id?: string | number | null;
+}
+
+function messagesOf(body: unknown): JsonRpcMessage[] {
+  if (Array.isArray(body)) return body as JsonRpcMessage[];
+  return body ? [body as JsonRpcMessage] : [];
+}
+
+/**
+ * Only tools/call reaches Zendesk. initialize and tools/list stay open so the
+ * MintMCP health probe keeps passing.
+ */
+export function requiresAccessToken(body: unknown): boolean {
+  return messagesOf(body).some((m) => m.method === "tools/call");
+}
+
+/** Echo the caller's id so the client can match the 401 to its request. A batch has no single id */
+export function responseIdFor(body: unknown): string | number | null {
+  const messages = messagesOf(body);
+  return messages.length === 1 ? messages[0]?.id ?? null : null;
+}
+
 export interface RequestContext {
   accessToken: string;
   zendeskDomain: string;
@@ -15,9 +47,7 @@ function getContext(): RequestContext {
   const ctx = requestContext.getStore();
   if (!ctx?.accessToken || !ctx?.zendeskDomain) {
     throw new Error(
-      "Missing Zendesk credentials. The OAuth access token must be forwarded as " +
-        "an Authorization: Bearer header, and ZENDESK_DOMAIN must be set as a container " +
-        "env var or forwarded via X-MintMCP-Env-ZENDESK_DOMAIN."
+      NOT_CONNECTED_MESSAGE,
     );
   }
   return ctx;
